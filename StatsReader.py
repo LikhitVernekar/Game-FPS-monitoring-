@@ -5,35 +5,34 @@ import os
 import threading
 import datetime
 
-# Path to MSI Afterburner CSV log file
 log_file = r"C:\Users\likhi\Documents\HardwareMonitoring.csv"
 backup_file = log_file + ".bak"
 
-FPS_COLUMN_INDEX = 91
-TIMESTAMP_COLUMN_INDEX = 1
+FPS_INDEX = 91
+CPU_TEMP_INDEX = 37
+GPU2_TEMP_INDEX = 3
+RAM_USAGE_INDEX = 89
+TIMESTAMP_INDEX = 1
+FPS_TIMEOUT_SECONDS = 10
 LINES_TO_KEEP = 1000
-FPS_TIMEOUT_SECONDS = 10  # Stale threshold
 
 arduino = None
 
-# --- Try to connect to Arduino repeatedly ---
 def connect_arduino():
     global arduino
     while True:
         try:
-            arduino = serial.Serial('COM3', 9600)
+            arduino = serial.Serial('COM7', 9600)
             print("✅ Arduino connected.")
             return
         except:
-            print("🔌 Waiting for Arduino connection on COM3...")
+            print("🔌 Waiting for Arduino connection on COM7...")
             time.sleep(3)
 
-# --- Function to Get Latest Valid FPS ---
-def get_latest_fps():
+def get_latest_stats():
     try:
         if not os.path.exists(log_file):
-            print("❌ Log file not found.")
-            return 0
+            return None
 
         with open(log_file, 'r', encoding='cp1252') as f:
             lines = f.readlines()
@@ -48,45 +47,40 @@ def get_latest_fps():
             if header_found:
                 data_lines.append(row)
 
-        if not data_lines:
-            print("⚠️ No data found after header.")
-            return 0
+        for row in reversed(data_lines):
+            if len(row) > max(FPS_INDEX, CPU_TEMP_INDEX, GPU2_TEMP_INDEX, RAM_USAGE_INDEX):
+                fps_str = row[FPS_INDEX].strip()
+                cpu_temp_str = row[CPU_TEMP_INDEX].strip()
+                gpu2_temp_str = row[GPU2_TEMP_INDEX].strip()
+                ram_usage_str = row[RAM_USAGE_INDEX].strip()
+                timestamp_str = row[TIMESTAMP_INDEX].strip()
 
-        for data_row in reversed(data_lines):
-            if len(data_row) > FPS_COLUMN_INDEX:
-                fps_value = data_row[FPS_COLUMN_INDEX].strip()
-                timestamp_str = data_row[TIMESTAMP_COLUMN_INDEX].strip()
-
-                if not fps_value or fps_value.upper() == "N/A":
+                if not fps_str or fps_str.upper() == "N/A":
                     continue
 
                 try:
                     log_time = datetime.datetime.strptime(timestamp_str, "%d-%m-%Y %H:%M:%S")
                     now = datetime.datetime.now()
                     if (now - log_time).total_seconds() > FPS_TIMEOUT_SECONDS:
-                        return 0
+                        return None
                 except:
-                    return 0
+                    return None
 
-                return int(float(fps_value))
+                try:
+                    fps = int(float(fps_str))
+                    cpu_temp = int(float(cpu_temp_str))
+                    gpu_temp = int(float(gpu2_temp_str))
+                    ram_usage = int(float(ram_usage_str))
+                    return fps, cpu_temp, gpu_temp, ram_usage
+                except:
+                    continue
 
-        return 0
+        return None
 
     except Exception as e:
-        print("❌ Error reading file:", e)
-        return 0
+        print("❌ Error:", e)
+        return None
 
-# --- Function to Display Cute Face on Arduino ---
-def send_robot_face():
-    face = "[o_o]"
-    print("🤖 No game running", face)
-    try:
-        arduino.write(f"{face}\n".encode())
-    except:
-        print("⚠️ Failed to write to Arduino. Reconnecting...")
-        connect_arduino()
-
-# --- Clean Log File (Preserve Header + Last N Data Rows) ---
 def clean_log_file():
     try:
         if not os.path.exists(log_file):
@@ -102,7 +96,6 @@ def clean_log_file():
                 break
 
         if header_index is None:
-            print("❌ Header not found.")
             return
 
         header_lines = lines[:header_index + 1]
@@ -125,26 +118,37 @@ def clean_log_file():
     except Exception as e:
         print("❌ Error cleaning log file:", e)
 
-# --- Periodic Cleanup (Every 10 Minutes) ---
 def periodic_cleanup():
     clean_log_file()
     threading.Timer(600, periodic_cleanup).start()
 
-# --- Start everything ---
+# Start
 connect_arduino()
 periodic_cleanup()
 
+prev_game_running = True  # assume game is running initially
+
 while True:
-    fps = get_latest_fps()
+    stats = get_latest_stats()
+    if stats:
+        fps, cpu_temp, gpu_temp, ram_usage = stats
 
-    if fps == 0:
-        send_robot_face()
-    else:
-        print(f"🎮 FPS: {fps}")
-        try:
-            arduino.write(f"{fps}\n".encode())
-        except:
-            print("⚠️ Failed to write to Arduino. Reconnecting...")
-            connect_arduino()
+        if fps == 0:
+            if prev_game_running:
+                print("🛑 No game running. FPS is 0.")
+                prev_game_running = False
+            try:
+                arduino.write(b"0,0,0,0\n")
+            except:
+                connect_arduino()
+        else:
+            if not prev_game_running:
+                print("✅ Game detected. Stats streaming...")
+                prev_game_running = True
 
-    time.sleep(0.5)
+            print(f"🎮 FPS: {fps}, 🌡️ CPU: {cpu_temp}°C, 🖥️ GPU: {gpu_temp}°C, 🧠 RAM: {ram_usage} MB")
+            try:
+                arduino.write(f"{fps},{cpu_temp},{gpu_temp},{ram_usage}\n".encode())
+            except:
+                connect_arduino()
+    time.sleep(1.0)
