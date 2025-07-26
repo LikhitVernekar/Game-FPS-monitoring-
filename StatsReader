@@ -1,0 +1,112 @@
+#include <Wire.h>
+#include <U8g2lib.h>
+
+U8G2_SH1106_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0);
+
+char inputBuffer[32];
+int inputIndex = 0;
+
+int fps = 0;
+int cpuTemp = 0;
+int gpuTemp = 0;
+int ramUsage = 0;
+
+unsigned long lastReceivedTime = 0;
+unsigned long lastValidDataTime = 0;  // Track when we last got FPS > 0
+unsigned long firstZeroFpsTime = 0;   // Track when we first got 0 FPS
+const unsigned long TIMEOUT_MS = 3000;
+const unsigned long ZERO_FPS_DISPLAY_TIME = 1000;  // Show 0 FPS for only 1 second
+const unsigned long ZERO_FPS_IGNORE_TIME = 2000;  // Ignore 0 FPS data after this time
+bool displayActive = false;
+bool hasShownZeroFps = false;
+
+void setup() {
+  Serial.begin(9600);
+  u8g2.begin();
+  u8g2.enableUTF8Print();
+
+  u8g2.firstPage();
+  do {
+    u8g2.setFont(u8g2_font_profont22_tf);
+    u8g2.setCursor(0, 40);
+    u8g2.print("Waiting...");
+  } while (u8g2.nextPage());
+}
+
+void loop() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n') {
+      inputBuffer[inputIndex] = '\0';
+      parseData(inputBuffer);
+      inputIndex = 0;
+      lastReceivedTime = millis();
+      displayActive = true;
+    } else {
+      if (inputIndex < sizeof(inputBuffer) - 1) {
+        inputBuffer[inputIndex++] = c;
+      }
+    }
+  }
+
+  // Check if we should go to "No signal" state
+  bool shouldShowNoSignal = false;
+  
+  if (displayActive) {
+    // If we've been showing 0 FPS for more than ZERO_FPS_DISPLAY_TIME, switch to no signal
+    if (hasShownZeroFps && millis() - firstZeroFpsTime > ZERO_FPS_DISPLAY_TIME) {
+      shouldShowNoSignal = true;
+    }
+    // Or if we haven't received any data for the timeout period
+    else if (millis() - lastReceivedTime > TIMEOUT_MS) {
+      shouldShowNoSignal = true;
+    }
+  }
+  
+  if (shouldShowNoSignal) {
+    u8g2.firstPage();
+    do {
+      u8g2.setFont(u8g2_font_profont22_tf);
+      u8g2.setCursor(0, 40);
+      u8g2.print("No signal...");
+    } while (u8g2.nextPage());
+
+    displayActive = false;
+    hasShownZeroFps = false;
+  }
+}
+
+void parseData(const char* data) {
+  int f, c, g, r;
+  if (sscanf(data, "%d,%d,%d,%d", &f, &c, &g, &r) == 4) {
+    // If we get 0 FPS and it's been more than ZERO_FPS_IGNORE_TIME since last valid data,
+    // ignore this data to prevent constant updates
+    if (f == 0 && millis() - lastValidDataTime > ZERO_FPS_IGNORE_TIME) {
+      return;  // Ignore 0 FPS data after game has been stopped for a while
+    }
+    
+    fps = f;
+    cpuTemp = c;
+    gpuTemp = g;
+    ramUsage = r;
+
+    // Update lastValidDataTime only when FPS > 0
+    if (fps > 0) {
+      lastValidDataTime = millis();
+      hasShownZeroFps = false;  // Reset zero FPS tracking
+    } else if (fps == 0 && !hasShownZeroFps) {
+      // First time we see 0 FPS, record the time
+      firstZeroFpsTime = millis();
+      hasShownZeroFps = true;
+    }
+
+    u8g2.firstPage();
+    do {
+      u8g2.setFont(u8g2_font_profont22_tf);
+      u8g2.setCursor(0, 14); u8g2.print("FPS: "); u8g2.print(fps);
+      u8g2.setCursor(0, 30); u8g2.print("CPU: "); u8g2.print(cpuTemp); u8g2.print((char)176); u8g2.print("C");
+      u8g2.setCursor(0, 46); u8g2.print("GPU: "); u8g2.print(gpuTemp); u8g2.print((char)176); u8g2.print("C");
+      u8g2.setCursor(0, 62); u8g2.print("RAM: "); u8g2.print(ramUsage); u8g2.print(" MB");
+    } while (u8g2.nextPage());
+  }
+}
